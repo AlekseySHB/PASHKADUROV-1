@@ -3,6 +3,7 @@ from sqlalchemy import select
 from utils.ssh_client import SSHClient
 from db.models import User
 import paramiko
+import re
 
 
 class BotLogic:
@@ -10,33 +11,48 @@ class BotLogic:
         self.session = session
 
     async def register_user(self, telegram_id: int, username: str) -> str:
+        """Регистрация нового пользователя"""
         user = await self.session.scalar(select(User).where(User.telegram_id == telegram_id))
         if user:
             return "Вы уже зарегистрированы!"
+
         self.session.add(User(telegram_id=telegram_id, username=username))
         await self.session.commit()
         return f"Привет, {username}! Вы зарегистрированы."
 
     async def get_user_status(self, telegram_id: int) -> str:
+        """Получение статуса пользователя"""
         user = await self.session.scalar(select(User).where(User.telegram_id == telegram_id))
         if not user:
             return "Вы не зарегистрированы. Используйте /start."
+
         status = f"Пользователь: {user.username}\n"
+
         if user.vm_ip and user.vm_username:
             status += f"ВМ: {user.vm_ip} (пользователь: {user.vm_username})"
         else:
-            status += "ВМ не настроена. Используйте /vmpath."
+            status += "ВМ не настроена. Используйте /vmpath для настройки."
+
         return status
 
     async def save_vm_path(self, telegram_id: int, ip: str, username: str, password: str) -> str:
+        """Сохранение данных для подключения к ВМ с очисткой IP"""
         user = await self.session.scalar(select(User).where(User.telegram_id == telegram_id))
         if not user:
             return "Сначала зарегистрируйтесь через /start."
+
+        # Очищаем IP-адрес от лишних символов
+        ip = ip.strip().replace('<', '').replace('>', '')
+
+        # Проверяем формат IP-адреса (только IPv4)
+        if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
+            return "Неверный формат IP-адреса. Используйте только IPv4, например: 192.168.1.100"
+
         user.vm_ip = ip
         user.vm_username = username
         user.vm_password = password
         await self.session.commit()
-        return f"Данные для ВМ сохранены: {ip}, пользователь: {username}"
+        return f"Данные для подключения к ВМ сохранены: {ip}, пользователь: {username}"
 
     async def check_vm_connection(self, telegram_id: int) -> str:
         """Проверка подключения к ВМ с детальной обработкой ошибок."""
@@ -45,8 +61,10 @@ class BotLogic:
             return "Сначала укажите адрес ВМ через /vmpath."
 
         try:
-            with SSHClient(user.vm_ip, user.vm_username, user.vm_password) as ssh:
-                return "✅ Подключение к ВМ успешно!"
+            ssh = SSHClient(user.vm_ip, user.vm_username, user.vm_password)
+            ssh.connect()
+            ssh.close()
+            return "✅ Подключение к ВМ успешно!"
         except paramiko.AuthenticationException:
             return "❌ Ошибка аутентификации: Неверный логин или пароль."
         except paramiko.SSHException as e:
